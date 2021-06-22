@@ -12,7 +12,7 @@ class Contract:
         # User defined data members
         self.process = process
         self.maturity = 20
-        self.fee = 0.0046
+        self.fee = 0.0043
         self.spot = 0.03
         self.premium = 100
         self.g_amount = 100
@@ -24,8 +24,8 @@ class Contract:
         self.g_step = 10  # guaranteed account step
         self.p_step = 10  # personal account step
         # Integration limits
-        self.right_limit = -3.0
-        self.left_limit = 3.0
+        self.right_limit = 1.0
+        self.left_limit = -2.0
 
         for k, v in kwargs.items():
             if k in self.__dict__:
@@ -48,23 +48,23 @@ class Contract:
         self._d = np.real(-np.log(self.process.characteristic(-1j)))
         self._beta = np.exp((self.spot - self.div + self._d)*self.t_step) * (1 - self.fee*self.t_step)
         self._m = np.exp(-self.spot*self.t_step)
-        self._xx = np.linspace(self.left_limit, self.right_limit, 1000)
-        self._yy = [self._beta * np.exp(x) for x in self._xx]
-        self._density = [self.process.density(x) for x in self._xx]
+        self._xx = np.linspace(self.left_limit, self.right_limit, num=2**8+1)
+        self._dx = abs(self._xx[1] - self._xx[0])
+        self._yy = self._beta * np.apply_along_axis(np.exp, 0, self._xx)
+        self._density = np.apply_along_axis(np.vectorize(self.process.density), 0, self._xx)
         self._values = []  # list to gather all calculation steps.
-        self._splines = []
         self._price = 0.0
 
-    def set_fee(self, fee=0.0046):
+    def set_fee(self, fee=0.0043):
         self.fee = fee
         self._beta = np.exp((self.spot - self.div + self._d) * self.t_step) * (1 - self.fee * self.t_step)
-        self._yy = [self._beta * np.exp(x) for x in self._xx]
+        self._yy = self._beta * np.apply_along_axis(np.exp, 0, self._xx)
 
     def set_spot(self, spot=0.03):
         self.spot = spot
         self._beta = np.exp((self.spot - self.div + self._d) * self.t_step) * (1 - self.fee * self.t_step)
         self._m = np.exp(-self.spot * self.t_step)
-        self._yy = [self._beta * np.exp(x) for x in self._xx]
+        self._yy = self._beta * np.apply_along_axis(np.exp, 0, self._xx)
 
     def set_gstep(self, gstep=1):
         self.g_step = gstep
@@ -88,26 +88,25 @@ class Contract:
             if theta <= min(self.withdraw_amount, a):
                 aa = a - theta
             else:
-                if w != 0:
-                    aa = max(min(a - theta, a*(1-theta/w)), 0)
-                else:
-                    aa = 0
+                aa = max(min(a - theta, a*(1-theta/w)), 0) if w != 0 else 0
 
-            integrand = [ff(max(w - theta, 0) * y, aa).item() * dens for y, dens in zip(self._yy, self._density)]
-            return cc + self._m * trapz(integrand, self._xx)
+            _yy = max(w - theta, 0) * self._yy
+            _ff = np.array([ff(y, aa).item() for y in _yy])
+            integrand = _ff * self._density
+            return cc + self._m * trapz(integrand, dx=self._dx)
 
         # Static approach
         theta_val = self.withdraw_amount
         for t in np.arange(self._N - 2, 0, -self.t_step):
             # Step 2. I Interpolate the H x L triplets
             val_func = interpolate.RectBivariateSpline(self._p_account, self._g_account,  self._values[-1])
-            self._splines.append(val_func)
             # Step 2. II Compute the contract value at each time step.
             self._values.append(value(gg, pp, val_func, theta_val))
 
         # Contract value at inception
         val_func = interpolate.RectBivariateSpline(self._p_account, self._g_account, self._values[-1])
-        self._splines.append(val_func)
-        final_integrand = [val_func(self.premium*y, self.premium).item() * dens for y, dens in zip(self._yy, self._density)]
-        self._price = self._m * trapz(final_integrand, self._xx)
+        _YY = self.premium*self._yy
+        _FF = np.array([val_func(y, self.premium).item() for y in _YY])
+        final_integrand = _FF * self._density
+        self._price = self._m * trapz(final_integrand, dx=self._dx)
         return self._price
