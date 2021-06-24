@@ -1,7 +1,8 @@
 
 import numpy as np
 from scipy import interpolate
-from scipy.integrate import trapz
+from scipy import trapz
+from scipy import optimize
 
 
 class Contract:
@@ -15,14 +16,14 @@ class Contract:
         self.fee = 0.0043
         self.spot = 0.03
         self.premium = 100
-        self.g_amount = 100
-        self.withdraw_amount = 5
+        self.g_amount = self.premium
+        self.withdraw_amount = self.premium / self.maturity
         self.div = 0.0
         self.penalty = 0.05
         # Steps to discretize time, guaranteed account and personal account
         self.t_step = 1  # time step
-        self.g_step = 10  # guaranteed account step
-        self.p_step = 10  # personal account step
+        self.g_step = 0.5 * self.withdraw_amount   # guaranteed account step
+        self.p_step = 0.5 * self.withdraw_amount   # personal account step
         # Integration limits
         self.right_limit = 1.0
         self.left_limit = -2.0
@@ -44,6 +45,7 @@ class Contract:
         self._N = int(self.maturity / self.t_step) + 1
         self._g_account = np.linspace(0, self._max_g_account, self._H)
         self._p_account = np.linspace(0, self._max_p_account, self._L)
+        self._theta_step = 0.25 * self.withdraw_amount
         # constants for the integration (step 2. II)
         self._d = np.real(-np.log(self.process.characteristic(-1j)))
         self._beta = np.exp((self.spot - self.div + self._d)*self.t_step) * (1 - self.fee*self.t_step)
@@ -52,7 +54,6 @@ class Contract:
         self._dx = abs(self._xx[1] - self._xx[0])
         self._yy = self._beta * np.apply_along_axis(np.exp, 0, self._xx)
         self._density = np.apply_along_axis(np.vectorize(self.process.density), 0, self._xx)
-        self._values = []  # list to gather all calculation steps.
         self._price = 0.0
 
     def set_fee(self, fee=0.0043):
@@ -76,37 +77,81 @@ class Contract:
         self._L = int(self._max_p_account / self.p_step) + 1
         self._p_account = np.linspace(0, self._max_p_account, self._L)
 
-    def price(self):
+    def price(self, method="static"):
+        """
+
+        :param method:
+        :return:
+        """
+
+        @np.vectorize
+        def value(a, w, ff):
+            """
+            Compute the contract value at a given point of the guaranteed account
+            x personal account grid.
+            It's vectorized via decorator so that we can pass the meshgrid to it.
+
+            :param a:
+            :param w:
+            :param ff:
+            :return:
+            """
+            if a == 0 and w == 0:
+                return 0.0
+            aorg = min(self.withdraw_amount, a)
+            control_set = np.nditer(aorg)
+            if method == "dynamic":
+                cset_upper = max(aorg, w)
+                cset_dis_points = np.round(cset_upper / self._theta_step)
+                control_set = np.linspace(0, cset_upper, num=cset_dis_points)
+            elif method == "mixed":
+                control_set = np.nditer(np.array([aorg, w]))
+            values = []
+            for theta in control_set:
+                cc = theta - self.penalty * max(theta - aorg, 0)
+                if theta <= aorg:
+                    aa = a - theta
+                else:
+                    aa = max(min(a - theta, a * (1 - theta / w)), 0) if w != 0 else 0
+
+                _bb = max(w - theta, 0) * self._yy
+                _aa = np.repeat(aa, len(_bb))
+                integrand = ff.ev(_bb, _aa) * self._density
+                # Integral calculated by means of the trapezoid method
+                values.append(cc + self._m * trapz(integrand, dx=self._dx))
+            return max(values)
+
         # Initial contract value
         gg, pp = np.meshgrid(self._g_account, self._p_account)
-        self._values.append(np.maximum(gg, pp))
+        val = np.maximum(gg, pp)
 
-        # Evaluate the contract value at each point of the grid
-        @np.vectorize
-        def value(a, w, ff, theta):
-            cc = theta - self.penalty*max(theta - min(self.withdraw_amount, a), 0)
-            if theta <= min(self.withdraw_amount, a):
-                aa = a - theta
-            else:
-                aa = max(min(a - theta, a*(1-theta/w)), 0) if w != 0 else 0
-
-            _yy = max(w - theta, 0) * self._yy
-            _ff = np.array([ff(y, aa).item() for y in _yy])
-            integrand = _ff * self._density
-            return cc + self._m * trapz(integrand, dx=self._dx)
-
-        # Static approach
-        theta_val = self.withdraw_amount
         for t in np.arange(self._N - 2, 0, -self.t_step):
             # Step 2. I Interpolate the H x L triplets
-            val_func = interpolate.RectBivariateSpline(self._p_account, self._g_account,  self._values[-1])
+            val_func = interpolate.RectBivariateSpline(self._p_account, self._g_account, val)
             # Step 2. II Compute the contract value at each time step.
-            self._values.append(value(gg, pp, val_func, theta_val))
+            val = value(gg, pp, val_func)
 
         # Contract value at inception
-        val_func = interpolate.RectBivariateSpline(self._p_account, self._g_account, self._values[-1])
+        val_func = interpolate.RectBivariateSpline(self._p_account, self._g_account, val)
         _YY = self.premium*self._yy
-        _FF = np.array([val_func(y, self.premium).item() for y in _YY])
-        final_integrand = _FF * self._density
-        self._price = self._m * trapz(final_integrand, dx=self._dx)
+        _U = np.repeat(self.premium, len(self._yy))
+        final_integrand = val_func.ev(_YY, _U) * self._density
+        self._price = self._m*trapz(final_integrand, dx=self._dx)
         return self._price
+
+    def fair_fee(self, a=0.03, b=0.5, tol=1e-4, method="static"):
+        """
+
+        :param a:
+        :param b:
+        :param tol:
+        :param method:
+        :return:
+        """
+
+        def fun(x):
+            self.set_fee(x)
+            return self.price(method=method) - self.premium
+
+        return optimize.brentq(fun, a=a, b=b, xtol=tol, maxiter=50)
+
