@@ -22,11 +22,11 @@ class Contract:
         self.penalty = 0.05
         # Steps to discretize time, guaranteed account and personal account
         self.t_step = 1  # time step
-        self.g_step = 0.5 * self.withdraw_amount   # guaranteed account step
-        self.p_step = 0.5 * self.withdraw_amount   # personal account step
+        self.g_step = self.withdraw_amount   # guaranteed account step
+        self.p_step = 2 * self.withdraw_amount   # personal account step
         # Integration limits
-        self.right_limit = 1.0
-        self.left_limit = -2.0
+        self.right_limit = 0.5
+        self.left_limit = -1.5
 
         for k, v in kwargs.items():
             if k in self.__dict__:
@@ -37,12 +37,12 @@ class Contract:
         # Internal data members
         # Max values for the accounts
         self._max_g_account = self.premium  # max guaranteed account
-        self._k = 5  # internal factor to calculate the max personal account
+        self._k = 10  # internal factor to calculate the max personal account
         self._max_p_account = self._k * self._max_g_account  # max personal account
         # Variables for the pricing algorithm
         self._H = int(self._max_g_account / self.g_step) + 1
         self._L = int(self._max_p_account / self.p_step) + 1
-        self._N = int(self.maturity / self.t_step) + 1
+        self._N = int(self.maturity / self.t_step)
         self._g_account = np.linspace(0, self._max_g_account, self._H)
         self._p_account = np.linspace(0, self._max_p_account, self._L)
         self._theta_step = 0.25 * self.withdraw_amount
@@ -55,6 +55,19 @@ class Contract:
         self._yy = self._beta * np.apply_along_axis(np.exp, 0, self._xx)
         self._density = np.apply_along_axis(np.vectorize(self.process.density), 0, self._xx)
         self._price = 0.0
+
+    def set_maturity(self, maturity=20):
+        assert type(maturity) == int
+        self.maturity = maturity
+        self._N = int(self.maturity / self.t_step)
+
+    def set_integration_limits(self, right=0.5, left=-1.5):
+        self.right_limit = right
+        self.left_limit = left
+        self._xx = np.linspace(self.left_limit, self.right_limit, num=2 ** 8 + 1)
+        self._dx = abs(self._xx[1] - self._xx[0])
+        self._yy = self._beta * np.apply_along_axis(np.exp, 0, self._xx)
+        self._density = np.apply_along_axis(np.vectorize(self.process.density), 0, self._xx)
 
     def set_fee(self, fee=0.0043):
         self.fee = fee
@@ -101,9 +114,9 @@ class Contract:
             aorg = min(self.withdraw_amount, a)
             control_set = np.nditer(aorg)
             if method == "dynamic":
-                cset_upper = max(aorg, w)
-                cset_dis_points = np.round(cset_upper / self._theta_step)
-                control_set = np.linspace(0, cset_upper, num=cset_dis_points)
+                ctrl_set_upper = max(aorg, w)
+                ctrl_set_points = int(ctrl_set_upper / self._theta_step)
+                control_set = np.linspace(0, ctrl_set_upper, num=ctrl_set_points)
             elif method == "mixed":
                 control_set = np.nditer(np.array([aorg, w]))
             values = []
@@ -121,17 +134,24 @@ class Contract:
                 values.append(cc + self._m * trapz(integrand, dx=self._dx))
             return max(values)
 
+        def calc_price(n, c_val):
+            if n == 1:
+                interp_func = interpolate.RectBivariateSpline(self._p_account, self._g_account, c_val)
+                return value(gg, pp, interp_func)
+            else:
+                # Interpolate the H x L triplets
+                interp_func = interpolate.RectBivariateSpline(self._p_account, self._g_account, c_val)
+                # Compute the contract value at each point of the grid
+                c_val = value(gg, pp, interp_func)
+                return calc_price(n-1, c_val)
+
         # Initial contract value
         gg, pp = np.meshgrid(self._g_account, self._p_account)
-        val = np.maximum(gg, pp)
+        ini_val = np.maximum(gg, pp)
+        # Step 2. II Compute the contract value at each time step but t=0.
+        val = calc_price(self._N-1, ini_val)
 
-        for t in np.arange(self._N - 2, 0, -self.t_step):
-            # Step 2. I Interpolate the H x L triplets
-            val_func = interpolate.RectBivariateSpline(self._p_account, self._g_account, val)
-            # Step 2. II Compute the contract value at each time step.
-            val = value(gg, pp, val_func)
-
-        # Contract value at inception
+        # Contract value at inception (t=0)
         val_func = interpolate.RectBivariateSpline(self._p_account, self._g_account, val)
         _YY = self.premium*self._yy
         _U = np.repeat(self.premium, len(self._yy))
@@ -139,7 +159,7 @@ class Contract:
         self._price = self._m*trapz(final_integrand, dx=self._dx)
         return self._price
 
-    def fair_fee(self, a=0.03, b=0.5, tol=1e-4, method="static"):
+    def fair_fee(self, a=0, b=1, tol=1e-4, method="static"):
         """
 
         :param a:
@@ -152,6 +172,4 @@ class Contract:
         def fun(x):
             self.set_fee(x)
             return self.price(method=method) - self.premium
-
         return optimize.brentq(fun, a=a, b=b, xtol=tol, maxiter=50)
-
