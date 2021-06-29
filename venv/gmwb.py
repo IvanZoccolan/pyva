@@ -96,19 +96,8 @@ class Contract:
         :param method:
         :return:
         """
-
+        @np.vectorize
         def value(a, w, ff):
-            """
-            Compute the contract value at a given point of the guaranteed account
-            x personal account grid.
-            It's vectorized via decorator so that we can pass the meshgrid to it.
-
-            :param a:
-            :param w:
-            :param ff:
-            :return:
-            """
-
             if a == 0 and w == 0:
                 return 0.0
             max_guaranteed_withdraw = min(self.withdraw_amount, a)
@@ -145,17 +134,13 @@ class Contract:
         def calc_price(n, c_val):
             if n == 1:
                 interp_func = interpolate.RectBivariateSpline(self._p_account, self._g_account, c_val)
-                for p in np.arange(0, self._p_points):
-                    for g in np.arange(0, self._g_points):
-                        c_val[p, g] = value(self._g_account[g], self._p_account[p], interp_func)
+                c_val = value(gg, pp, interp_func)
                 return c_val
             else:
                 # Interpolate the H x L triplets
                 interp_func = interpolate.RectBivariateSpline(self._p_account, self._g_account, c_val)
                 # Compute the contract value at each point of the grid
-                for p in np.arange(0, self._p_points):
-                    for g in np.arange(0, self._g_points):
-                        c_val[p, g] = value(self._g_account[g], self._p_account[p], interp_func)
+                c_val = value(gg, pp, interp_func)
                 return calc_price(n-1, c_val)
 
         # Initial contract value
