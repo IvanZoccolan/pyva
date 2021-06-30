@@ -124,3 +124,43 @@ class CGMYProcess(BaseProcess):
         left = (self._m - 1j*u)**self._y - self._m**self._y
         right = (self._g + 1j*u)**self._y - self._g**self._y
         return np.exp(self._c * time * gamma(-self._y) * (left + right))
+
+
+class VGProcess(BaseProcess):
+    """
+    Class for the Variance Gamma stochastic process.
+
+    Parameters
+    ----------
+    mu: (float) drift of the Brownian motion.
+    sigma: (float) volatility of the Brownian motion.
+    nu: (float) variance of the Gamma process
+    """
+    def __init__(self, mu=-0.3150, sigma=0.1301, nu=0.1753):
+        super().__init__()
+        self._mu = mu
+        if sigma > 0.:
+            self._sigma = sigma
+        else:
+            raise KeyError("sigma must be strictly greater than zero.")
+        if nu > 0.:
+            self._nu = nu
+        else:
+            raise KeyError("nu must be strictly greater than zero.")
+
+    def characteristic(self, u, time=1):
+        """
+        Characteristic function Phi(u) of the X(t) variable of the Variance Gamma process.
+
+        Parameters
+        ----------
+        u: (float) u-coordinate of the characteristic function.
+        time: (float) time t coordinate of the process {X(t) t>=0}.
+
+        Returns
+        ------
+        float: Phi(u) ordinate value mapping the u-coordinate.
+        """
+        const = -(time/self._nu)
+        esp = np.log(1 - 1j * u * self._mu * self._nu + 0.5 * self._sigma ** 2 * u ** 2 * self._nu)
+        return np.exp(const * esp)
