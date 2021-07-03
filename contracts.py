@@ -56,6 +56,9 @@ class GMWB:
         self._density = np.apply_along_axis(np.vectorize(self.process.density), 0, self._xx)
         self._price = 0.0
 
+    def set_penalty(self, penalty=0.05):
+        self.penalty = penalty
+
     def set_maturity(self, maturity=20):
         assert type(maturity) == int
         self.maturity = maturity
@@ -70,6 +73,7 @@ class GMWB:
         self._density = np.apply_along_axis(np.vectorize(self.process.density), 0, self._xx)
 
     def set_fee(self, fee=0.0043):
+        assert type(fee) == float
         self.fee = fee
         self._beta = np.exp((self.spot - self.div + self._d) * self.t_step) * (1 - self.fee * self.t_step)
         self._yy = self._beta * np.apply_along_axis(np.exp, 0, self._xx)
