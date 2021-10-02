@@ -3,9 +3,10 @@ from abc import ABCMeta
 import numpy as np
 from scipy.integrate import quad
 from scipy.special import gamma
+from scipy.stats import ncx2
 
 
-class BaseProcess(metaclass=ABCMeta):
+class LevyProcess(metaclass=ABCMeta):
     """ Base class for Levy stochastic processes {X(t): t >= 0}
         defined by their characteristic function.
     """
@@ -38,7 +39,7 @@ class BaseProcess(metaclass=ABCMeta):
                                 np.inf)[0]
 
 
-class VGProcess(BaseProcess):
+class VGProcess(LevyProcess):
     """
     Class for the Variance Gamma stochastic process.
 
@@ -78,7 +79,7 @@ class VGProcess(BaseProcess):
         return np.exp(const * esp)
 
 
-class CGMYProcess(BaseProcess):
+class CGMYProcess(LevyProcess):
     """
     Class for the Carr, Geman, Madan, Yor (CGMY) stochastic process.
 
@@ -126,41 +127,87 @@ class CGMYProcess(BaseProcess):
         return np.exp(self._c * time * gamma(-self._y) * (left + right))
 
 
-class VGProcess(BaseProcess):
+class CirMortality:
     """
-    Class for the Variance Gamma stochastic process.
+    CIR intensity of mortality process.
 
     Parameters
     ----------
-    mu: (float) drift of the Brownian motion.
-    sigma: (float) volatility of the Brownian motion.
-    nu: (float) variance of the Gamma process
+    alpha: (float)
+    theta: (float)
+    sigma: (float) volatility of the process
+    mu0: (float) initial value of the  process
+
     """
-    def __init__(self, mu=-0.3150, sigma=0.1301, nu=0.1753):
-        super().__init__()
-        self._mu = mu
-        if sigma > 0.:
-            self._sigma = sigma
-        else:
-            raise KeyError("sigma must be strictly greater than zero.")
-        if nu > 0.:
-            self._nu = nu
-        else:
-            raise KeyError("nu must be strictly greater than zero.")
 
-    def characteristic(self, u, time=1):
+    def __init__(self, alpha=7.989275e-05, theta=0.1326157, sigma=0.007732111, mu0=0.002239457):
+        self.alpha = alpha
+        self.theta = theta
+        self.sigma = sigma
+        self.mu0 = mu0
+        self.gamma = np.sqrt(theta**2 + 2*sigma**2)
+        self.df = 4 * alpha / sigma ** 2
+
+    def _c1(self, t):
+        n = 2 * self.gamma * np.exp(0.5 * (self.gamma - self.theta) * t)
+        d = (self.gamma - self.theta) * (np.exp(self.gamma * t) - 1) + 2 * self.gamma
+        return (n/d)**((2*self.alpha)/(self.sigma**2))
+
+    def _c2(self, t):
+        n = 2 * (np.exp(self.gamma * t) - 1)
+        d = (self.gamma - self.theta)*(np.exp(self.gamma*t) - 1) + 2*self.gamma
+        return n/d
+
+    def px(self, t, mu):
         """
-        Characteristic function Phi(u) of the X(t) variable of the Variance Gamma process.
+         Survival function of the CIR process
 
-        Parameters
-        ----------
-        u: (float) u-coordinate of the characteristic function.
-        time: (float) time t coordinate of the process {X(t) t>=0}.
-
-        Returns
-        ------
-        float: Phi(u) ordinate value mapping the u-coordinate.
+        :param t: (float) time
+        :param mu: (float) value of the intensity of mortality at time t = 0
+        :return: (float) probability of survival at time t
         """
-        const = -(time/self._nu)
-        esp = np.log(1 - 1j * u * self._mu * self._nu + 0.5 * self._sigma ** 2 * u ** 2 * self._nu)
-        return np.exp(const * esp)
+        assert t >= 0.0
+        return self._c1(t) * np.exp(-self._c2(t) * mu)
+
+    def qx(self, t, mu):
+        """
+        Death function of the CIR process
+
+        :param t: (float) time
+        :param mu: (float) value of the intensity of mortality at time t = 0
+        :return: (float) probability of death at time t
+        """
+
+        assert t >= 0.0
+        return 1 - self.px(t, mu)
+
+    def cpdf(self, x, mu, dt):
+        """
+        Conditional probability density function of the CIR intensity of mortality.
+        This is the pdf of mu(t) given mu(s), where dt = t - s.
+        :param x: (float) x-coordinate
+        :param mu: (float) intensity of mortality mu(s) to condition upon.
+        :param dt: (float) time delta between intensities of mortality dt = t - s.
+        :return: float y-coordinate of the cpdf.
+
+        """
+        k = 4 * self.theta / (self.sigma ** 2 * (np.exp(self.theta*dt) - 1))
+        nc_par = k * mu * np.exp(self.theta*dt)
+        return k * ncx2.pdf(x=k*x, df=self.df, nc=nc_par)
+
+    def cond_moments(self, mu, dt):
+        """
+        Calculates the variance and mean of mu(t) given m(s)
+        :param mu: (float) intensity of mortality mu(s) to condition upon.
+        :param dt: (float) time delta between intensities of mortality dt = t - s.
+        :return:  tuple of floats with the mean and variance of the random variable mu(t) | mu(t)
+        """
+        d1 = np.exp(2*self.theta*dt) - np.exp(self.theta*dt)
+        d2 = (1 - np.exp(self.theta*dt))**2
+        var = (self.sigma**2 / self.theta)*(mu*d1 + 0.5*d2)
+        mean = mu * np.exp(self.theta*dt) - (self.alpha / self.theta) * (1 - np.exp(self.theta*dt))
+        return mean, var
+
+
+
+
