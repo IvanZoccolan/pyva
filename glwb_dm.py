@@ -1,11 +1,11 @@
 import numpy as np
 from scipy import optimize
 from scipy.integrate import simpson
-from fast_interp import interp3d
+from scipy.interpolate import RegularGridInterpolator
 from datetime import datetime
+import sys
 
-
-class GLWB:
+class GLWB_DM:
 
     def __init__(self, financial_process, mortality_process, **kwargs):
         self.financial_process = financial_process
@@ -21,9 +21,6 @@ class GLWB:
         self.t_step = 1  # time step
         self.g_points = 21  # Number of points to discretize the withdrawal base account
         self.p_points = 21  # Number of points to discretize the personal account
-        self.num_mu_pts = 21  # Number of points to discretize the support of the intensity of mortality
-        self.min_mu = 1E-6
-        self.max_mu = 10  # maximum value for the intensity of mortality
 
         for k, v in kwargs.items():
             if k in self.__dict__:
@@ -41,13 +38,11 @@ class GLWB:
         self.k = 10
         self._max_p_account = self.k * self._max_g_account  # max personal account
         self._p_account, self._p_step = np.linspace(0.0, self._max_p_account, self.p_points, retstep=True)
-        # Mortality space
-        self._mu_space, self._mu_step = np.linspace(self.min_mu, self.max_mu, self.num_mu_pts, retstep=True)
+        # self._p_account = self._map_personal(np.linspace(0, 1, self.p_points))
+        # self._p_account[-1] = self._p_account[-2] * np.exp(self.spot)
         # Constants for the integration
         self._d = np.real(-np.log(self.financial_process.characteristic(-1j)))
         self._beta = np.exp(self.spot + self._d) * (1 - self.fee)
-        self._qx = {x: self.mortality_process.qx(t=1, mu=x) for x in self._mu_space}
-        self._qx[self.mortality_process.mu0] = self.mortality_process.qx(t=1, mu=self.mortality_process.mu0)
         # Outer integral
         self.outer_right_limit = 0.5
         self.outer_left_limit = -1.5
@@ -55,41 +50,29 @@ class GLWB:
         self._xx, self._dx = np.linspace(self.outer_left_limit, self.outer_right_limit,
                                          num=self._num_outer_pts, endpoint=True, retstep=True)
         self._financial_density = np.apply_along_axis(np.vectorize(self.financial_process.density), 0, self._xx)
-        # Inner integral
-        self._num_inner_pts = 2 ** 5 + 1
-        # Define the inner integration limits specific to each value of the intensity of mortality
-        # discretized space.
-        _yy = []
-        _dy = []
-        for idx in np.arange(0, self.num_mu_pts):
-            left, right = self.mortality_process.cond_support(mu=self._mu_space[idx], dt=1)
-            yy, dy = np.linspace(left, right, num=self._num_inner_pts, endpoint=True, retstep=True)
-            _yy.append(yy)
-            _dy.append(dy)
-        self._yy = np.array(_yy).reshape(self.num_mu_pts * self._num_inner_pts)
-        self._dy = np.array(_dy).reshape(self.num_mu_pts)
-
-        self._mortality_cpdf = np.empty((self.num_mu_pts, self._num_inner_pts))
-        self.mortality_coeff = np.empty((self.num_mu_pts, self._num_inner_pts))
-        self._total = self.num_mu_pts * self._num_inner_pts * self._num_outer_pts
-        self._yyy = np.tile(self._yy, self._num_outer_pts).reshape((self._total, 1))
-        for i in np.arange(0, self.num_mu_pts):
-            for j in np.arange(0, self._num_inner_pts):
-                self._mortality_cpdf[i, j] = self.mortality_process.cpdf(self._yy[i * self._num_inner_pts + j],
-                                                                         mu=self._mu_space[i], dt=1)
-                self.mortality_coeff[i, j] = np.exp(-0.5 * (self._mu_space[i] + self._yy[i * self._num_inner_pts + j]))
         self._points = {}
         for a in self._g_account:
             for w in self._p_account:
                 for wd in [0, self.g_rate * a, w]:
                     self._points[(w, a, wd)] = self.calc_points(w, a, wd)
         self._interp_values = {}
-
-        # Initial contract value
-        self.c_val = np.zeros((self.p_points, self.g_points, self.num_mu_pts))
+        self.c_val = np.empty((self.p_points, self.g_points))
         self._price = 0.0
-
+        self.debug = {}
         # Methods
+
+    @staticmethod
+    def _map_personal(t, a=100):
+        # Given the personal account doesn't have an upper bound,
+        # we simulate a "fake" unbounded interval [0, Inf] by mapping  [0, 1] by means of this function
+        try:
+            # This internal function takes either np.arrays or scalar values. In both cases
+            # we check for the value 1 to prevent division by zero warnings.
+            # Duck test. If it's not a np.array it raises TypeError
+            res = np.array([a * x / (1 - x) if x != 1 else np.Inf for x in t])
+        except TypeError:
+            res = a * t / (1 - t) if t != 1 else np.Inf
+        return res
 
     def set_fee(self, fee=0.0043):
         assert type(fee) == float
@@ -121,7 +104,7 @@ class GLWB:
             for w in self._p_account:
                 for wd in [0, self.g_rate * a, w]:
                     self._points[(w, a, wd)] = self.calc_points(w, a, wd)
-        self.c_val = np.empty((self.p_points, self.g_points, self.num_mu_pts))
+        self.c_val = np.empty((self.p_points, self.g_points))
 
     def set_g_rate(self, g_rate=0.01):
         self.g_rate = g_rate
@@ -143,9 +126,9 @@ class GLWB:
             alpha = a
         elif self.g_rate * a < wd <= w:
             alpha = a * ((w - wd) / (w - self.g_rate * a))
-        mbeta = np.repeat(beta * np.exp(self._xx), self.num_mu_pts * self._num_inner_pts).reshape((self._total, 1))
-        malpha = np.repeat(alpha, self._total).reshape((self._total, 1))
-        points = (mbeta, malpha, self._yyy)
+        mbeta = beta * np.exp(self._xx)
+        malpha = np.repeat(alpha, self._num_outer_pts)
+        points = (mbeta, malpha)
         return points
 
     def price(self, method="static"):
@@ -155,85 +138,78 @@ class GLWB:
         :return:
         """
 
-        def calc_integral(shift, r, interp_vals, mort_coeff, mort_cpdf, fin_density, deltax, deltay):
-            zz = np.apply_along_axis(lambda row: mort_coeff * row * mort_cpdf, 1, interp_vals)
-            zz = np.apply_along_axis(lambda col: fin_density * col, 0, zz)
-            res = shift + np.exp(-r) * simpson(simpson(zz, dx=deltay), dx=deltax)
+        def calc_integral(shift, r, interp_vals, px, fin_density, deltax):
+            res = shift + np.exp(-r) * px * simpson(interp_vals * fin_density, dx=deltax)
             return res
 
-        def value(w, a, mu):
+        def value(w, a, t):
             # Function to calculate the contract values at each point of the
-            # base  x personal account x mu space grid in a single point in time.
+            # base  x personal account in a single point in time.
             if method == "static":
                 withdrawals = [self.g_rate * a]
             elif method == "dynamic":
                 withdrawals = [0, self.g_rate * a, w]
             elif method == "mixed":
                 withdrawals = [self.g_rate * a, w]
-            mu_idx, = (self._mu_space == mu).nonzero()
-            mu_idx = mu_idx.item()
-            bottom = mu_idx * self._num_inner_pts
-            top = bottom + self._num_inner_pts
             integrals = []
+            px = self.mortality_process.px(t+self.t_step) / self.mortality_process.px(t)
+            qx = 1 - px
             for wd in withdrawals:
                 shift = wd - self.penalty * max(wd - self.g_rate * a, 0) + \
-                        self._qx[mu] * max(w - wd, 0) * (1 - self.fee)
-                values = self._interp_values[(w, a, wd)][:, bottom:top]
+                       qx * max(w - wd, 0) * (1 - self.fee)
+                values = self._interp_values[(w, a, wd)]
                 integrals.append(calc_integral(shift=shift, r=self.spot, interp_vals=values,
-                                                     mort_coeff=self.mortality_coeff[mu_idx, :],
-                                                     mort_cpdf=self._mortality_cpdf[mu_idx, :],
-                                                     fin_density=self._financial_density,
-                                                     deltax=self._dx,
-                                                     deltay=self._dy[mu_idx])
+                                               px=px,
+                                               fin_density=self._financial_density,
+                                               deltax=self._dx)
                                  )
+            res = np.max(integrals)
+            # try:
+            #     del(self.debug[(w, a)])
+            # except KeyError:
+            #     pass
+            # if integrals[0] < res:
+            #     print(f'Error {integrals[0]} is less than {res}\n')
+            #     self.debug[(w, a)] = [integrals, res]
+            return res
 
-            return np.max(integrals)
+        def calc_price(n):
+            # Iterative function to calculate the personal account x base grid from T - 1 to 1
+            for t in np.arange(n, 0, -self.t_step):
+                t1 = datetime.utcnow()
+                print(f'Step {t}\n')
+                interp_func = RegularGridInterpolator((self._p_account, self._g_account), self.c_val, bounds_error=False, fill_value=None)
+                for key in self._points.keys():
+                    self._interp_values[key] = interp_func(self._points[key])
+                for k, w in enumerate(self._p_account):
+                    for j, a in enumerate(self._g_account):
+                            self.c_val[k, j] = value(w, a, t)
+                t2 = datetime.utcnow()
+                d = t2 - t1
+                print(f'Step  {t} done in {d} secs\n')
+            return self.c_val
+
+        # Initial contract value
+        for k, w in enumerate(self._p_account):
+            for j, a in enumerate(self._g_account):
+                    self.c_val[k, j] = 0.0
 
         # Step 2. II Compute the contract value at each time step but t=0.
-        for t in np.arange(self._t_points, 0, -self.t_step):
-            t1 = datetime.utcnow()
-            print(f'Step {t}\n')
-            interp_func = interp3d(a=[0.0, 0.0, self.min_mu],
-                                   b=[self._max_p_account, self._max_g_account, self.max_mu],
-                                   h=[self._p_step, self._g_step, self._mu_step],
-                                   f=self.c_val, k=1)
-            for key in self._points.keys():
-                x, y, z = self._points[key]
-                values = interp_func(x, y, z).reshape((self._num_outer_pts, self.num_mu_pts * self._num_inner_pts))
-                self._interp_values[key] = values
-            for k, w in enumerate(self._p_account):
-                for j, a in enumerate(self._g_account):
-                    for h, mu in enumerate(self._mu_space):
-                        self.c_val[k, j, h] = value(w, a, mu)
-            t2 = datetime.utcnow()
-            d = t2 - t1
-            print(f'Step  {t} done in {d} secs\n')
+        val = calc_price(self.maturity)
 
         # Contract value at inception (t=0)
         # Final interpolation
         t1 = datetime.utcnow()
         print(f'Step 0\n')
-
-        interp_func = interp3d(a=[0.0, 0.0, self.min_mu],
-                               b=[self._max_p_account, self._max_g_account, self.max_mu],
-                               h=[self._p_step, self._g_step, self._mu_step],
-                               f=self.c_val, k=1)
-        final_shift = self._qx[self.mortality_process.mu0] * self.premium * (1 - self.fee)
+        interp_func = RegularGridInterpolator((self._p_account, self._g_account), val, bounds_error=False, fill_value=None)
+        final_shift = self.mortality_process.qx(1) * self.premium * (1 - self.fee)
         final_beta = self.premium * self._beta
-        left, right = self.mortality_process.cond_support(mu=self.mortality_process.mu0, dt=1)
-        yy, dy = np.linspace(left, right, num=self._num_inner_pts, endpoint=True, retstep=True)
-        tot_pts = self._num_outer_pts*self._num_inner_pts
-        x = np.repeat(final_beta * np.exp(self._xx), self._num_inner_pts).reshape((tot_pts, 1))
-        y = np.repeat(self.premium, tot_pts).reshape((tot_pts, 1))
-        z = np.tile(yy, self._num_outer_pts).reshape((tot_pts, 1))
-        final_values = interp_func(x, y, z).reshape((self._num_outer_pts, self._num_inner_pts))
+        x = final_beta * np.exp(self._xx)
+        y = np.repeat(self.premium, self._num_outer_pts)
+        final_values = interp_func((x, y))
         # Final integration
-        mortality_cpdf = np.apply_along_axis(
-            lambda y: self.mortality_process.cpdf(y, mu=self.mortality_process.mu0, dt=1), 0, yy)
-        mortality_coeff = np.apply_along_axis(lambda y: np.exp(-0.5 * (self.mortality_process.mu0 + y)), 0, yy)
-        self._price = calc_integral(shift=final_shift, r=self.spot, interp_vals=final_values,
-                                    mort_coeff=mortality_coeff, mort_cpdf=mortality_cpdf,
-                                    fin_density=self._financial_density, deltax=self._dx, deltay=dy)
+        self._price = final_shift + np.exp(-self.spot) * self.mortality_process.px(1) * \
+                      simpson(final_values * self._financial_density, dx=self._dx)
         t2 = datetime.utcnow()
         d = t2 - t1
         print(f'Step 0 done in {d} secs\n')
@@ -254,4 +230,3 @@ class GLWB:
             return self.price(method=method) - self.premium
 
         return optimize.brentq(fun, a=a, b=b, xtol=tol, maxiter=50)
-

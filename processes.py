@@ -214,22 +214,33 @@ class CirMortality:
         :param mu: (float) intensity of mortality mu(s) to condition upon.
         :param dt: (float) time delta between intensities of mortality dt = t - s.
         :param verbose: (boolean) default to False. If true it returns the integral of
-        conditional density over the support
+               conditional density over the support
         :return: a tuple with the left and right extremes of the support.
-        If verbose = True it returns a list with the support and the integral of the density over it
-        The latter should sum to a value reasonably close to one and can be considered as a test
-        the estimate of the support is good enough.
+               If verbose = True it returns a list with the support and the integral of the density over it
+               The latter should sum to a value reasonably close to one and can be considered as a test
+               the estimate of the support is good enough.
         """
         m, v = self.cond_moments(mu, dt=dt)
         res = max(m - np.ceil(self.df) * np.sqrt(v), 0), m + np.ceil(self.df) * np.sqrt(v)
         if verbose:
-            xx, dx = np.linspace(res[0], res[1], 2**9+1, retstep=True)
+            xx, dx = np.linspace(res[0], res[1], 2**7+1, retstep=True)
             integr = np.apply_along_axis(lambda x: self.cpdf(x, mu, dt=dt), 0, xx)
-            support_integr= np.trapz(integr, dx=dx)
+            support_integr = np.trapz(integr, dx=dx)
             return {'support': res, 'integral': support_integr}
         else:
             return res
 
 
+class Gompertz:
+
+    def __init__(self, theta=0.126334634, mu0=0.002964637):
+        self.theta = theta
+        self.mu0 = mu0
+
+    def px(self, t):
+        return np.exp(-(self.mu0 / self.theta) * (np.exp(self.theta * t) - 1))
+
+    def qx(self, t):
+        return 1 - self.px(t)
 
 
