@@ -3,7 +3,6 @@ from scipy import optimize
 from scipy.integrate import simpson
 from scipy.interpolate import RegularGridInterpolator
 from datetime import datetime
-import sys
 
 class GLWB_DM:
 
@@ -56,9 +55,10 @@ class GLWB_DM:
                 for wd in [0, self.g_rate * a, w]:
                     self._points[(w, a, wd)] = self.calc_points(w, a, wd)
         self._interp_values = {}
-        self.c_val = np.empty((self.p_points, self.g_points))
+        # Initial contract value
+        self.c_val = np.zeros((self.p_points, self.g_points))
         self._price = 0.0
-        self.debug = {}
+
         # Methods
 
     @staticmethod
@@ -163,45 +163,27 @@ class GLWB_DM:
                                                fin_density=self._financial_density,
                                                deltax=self._dx)
                                  )
-            res = np.max(integrals)
-            # try:
-            #     del(self.debug[(w, a)])
-            # except KeyError:
-            #     pass
-            # if integrals[0] < res:
-            #     print(f'Error {integrals[0]} is less than {res}\n')
-            #     self.debug[(w, a)] = [integrals, res]
-            return res
-
-        def calc_price(n):
-            # Iterative function to calculate the personal account x base grid from T - 1 to 1
-            for t in np.arange(n, 0, -self.t_step):
-                t1 = datetime.utcnow()
-                print(f'Step {t}\n')
-                interp_func = RegularGridInterpolator((self._p_account, self._g_account), self.c_val, bounds_error=False, fill_value=None)
-                for key in self._points.keys():
-                    self._interp_values[key] = interp_func(self._points[key])
-                for k, w in enumerate(self._p_account):
-                    for j, a in enumerate(self._g_account):
-                            self.c_val[k, j] = value(w, a, t)
-                t2 = datetime.utcnow()
-                d = t2 - t1
-                print(f'Step  {t} done in {d} secs\n')
-            return self.c_val
-
-        # Initial contract value
-        for k, w in enumerate(self._p_account):
-            for j, a in enumerate(self._g_account):
-                    self.c_val[k, j] = 0.0
+            return np.max(integrals)
 
         # Step 2. II Compute the contract value at each time step but t=0.
-        val = calc_price(self.maturity)
+        for t in np.arange(self._t_points, 0, -self.t_step):
+            t1 = datetime.utcnow()
+            print(f'Step {t}\n')
+            interp_func = RegularGridInterpolator((self._p_account, self._g_account), self.c_val, bounds_error=False, fill_value=None)
+            for key in self._points.keys():
+                self._interp_values[key] = interp_func(self._points[key])
+            for k, w in enumerate(self._p_account):
+                for j, a in enumerate(self._g_account):
+                        self.c_val[k, j] = value(w, a, t)
+            t2 = datetime.utcnow()
+            d = t2 - t1
+            print(f'Step  {t} done in {d} secs\n')
 
         # Contract value at inception (t=0)
         # Final interpolation
         t1 = datetime.utcnow()
         print(f'Step 0\n')
-        interp_func = RegularGridInterpolator((self._p_account, self._g_account), val, bounds_error=False, fill_value=None)
+        interp_func = RegularGridInterpolator((self._p_account, self._g_account), self.c_val, bounds_error=False, fill_value=None)
         final_shift = self.mortality_process.qx(1) * self.premium * (1 - self.fee)
         final_beta = self.premium * self._beta
         x = final_beta * np.exp(self._xx)
