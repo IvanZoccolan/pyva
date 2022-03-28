@@ -127,7 +127,62 @@ class CGMYProcess(LevyProcess):
         return np.exp(self._c * time * gamma(-self._y) * (left + right))
 
 
-class CirMortality:
+class StochasticMortalityProcess(metaclass=ABCMeta):
+    """
+        Base class for stochastic mortality stochastic processes {X(t): t >= 0}
+
+    """
+    @abstractmethod
+    def __init__(self, **kwargs): pass
+
+    @abstractmethod
+    def px(self, **kwargs): pass
+    """
+        Survival function of the process
+        
+    """
+
+    @abstractmethod
+    def qx(self, **kwargs): pass
+
+    """
+         Mortality function of the process
+
+    """
+
+    @abstractmethod
+    def cpdf(self, **kwargs): pass
+    """
+        Conditional density probability of the intensity of mortality 
+        
+    """
+
+    @abstractmethod
+    def cond_support(self, **kwargs): pass
+    """
+        Estimates the support of the density of  mu(t) | mu(s)
+        
+    """
+
+
+class DeterministicMortalityProcess(metaclass=ABCMeta):
+    """
+        Base class for stochastic mortality stochastic processes {X(t): t >= 0}
+    """
+
+    @abstractmethod
+    def __init__(self, **kwargs): pass
+
+    @abstractmethod
+    def px(self, **kwargs): pass
+
+    """
+        Survival function of the process
+
+    """
+
+
+class CirMortality(StochasticMortalityProcess):
     """
     CIR intensity of mortality process.
 
@@ -139,7 +194,6 @@ class CirMortality:
     mu0: (float) initial value of the  process
 
     """
-
     def __init__(self, alpha=7.989275e-05, theta=0.1326157, sigma=0.007732111, mu0=0.002239457):
         self.alpha = alpha
         self.theta = theta
@@ -166,7 +220,7 @@ class CirMortality:
         :param mu: (float) value of the intensity of mortality at time t = 0
         :return: (float) probability of survival at time t
         """
-        assert t >= 0.0
+        assert np.all(t >= 0.0)
         return self._c1(t) * np.exp(-self._c2(t) * mu)
 
     def qx(self, t, mu):
@@ -178,7 +232,7 @@ class CirMortality:
         :return: (float) probability of death at time t
         """
 
-        assert t >= 0.0
+        assert np.all(t >= 0.0)
         return 1 - self.px(t, mu)
 
     def cpdf(self, x, mu, dt):
@@ -231,16 +285,27 @@ class CirMortality:
             return res
 
 
-class Gompertz:
+class Gompertz(DeterministicMortalityProcess):
 
     def __init__(self, theta=0.126334634, mu0=0.002964637):
         self.theta = theta
         self.mu0 = mu0
 
     def px(self, t):
+        """
+            Survival function of the Gompertz process
+
+            :param t: (float) time
+            :return: (float) probability of survival at time t
+        """
         return np.exp(-(self.mu0 / self.theta) * (np.exp(self.theta * t) - 1))
 
     def qx(self, t):
+        """
+            Death function of the CIR process
+
+            :param t: (float) time
+            :return: (float) probability of death at time t
+        """
+
         return 1 - self.px(t)
-
-

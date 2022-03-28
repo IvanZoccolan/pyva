@@ -4,17 +4,97 @@ from scipy.integrate import simpson
 from scipy.interpolate import RegularGridInterpolator
 from datetime import datetime
 
+
 class GLWB_DM:
+
+    """
+        VA contract with GLWB rider
+
+        Class for a VA contract with Guarateed Life Withdrawal Benefit (GLWB) rider, so that the insured can withdraw
+        from the account for all her lifetime regardless the  performance of the underlying fund.
+        The fund is described by Levy stochastic processes while the mortality is deterministic.
+        The contract key characteristics (e.g: fee, premium etc), financial parameters (e.g: risk free rate),
+        fund and mortality processes are specified during the object initialization.
+        The contract can be priced under "static", "mixed" and "dynamic" policyholder behaviors.
+        Under the "static" behavior the insured can withdraw only at a fixed annual withdrawal rate. Under the "mixed"
+        behavior she can withdraw at the specified rate or surrender the contract. Finally under the "dynamic" behavior,
+        the policyholder can withdraw any amount she wants or surrender.
+        The pricing is done by means of  Dynamic Programming (see References) by the "price" method.
+
+        Notes:
+        ------
+        In order to prevent numerical instability a central scenario for the intensity of mortality should be passed to
+        the object via the set_mu_space before calling its price method (see Examples).
+
+        Parameters
+        ----------
+        financial_process : object of class  LevyProcess describing the underlying fund
+
+        mortality_process: object of class DeterministicMortalityProcess describing the intensity of mortality process
+
+        maturity: int, maturity of the contract. It should be max possible age 110 - actual age of the insured
+
+        fee: float, contract fee
+
+        spot: float, risk-free spot rate
+
+        premium: float, unique premium at contract inception. The premium is fully invested into the fund
+
+        rollup: float, guaranteed  rate for the rollup of the initial premium invested.
+
+        g_rate: float, guaranteed annual withdrawal rate ("static", "mixed")
+
+        penalty: float, penalty applied in case the amount withdrawn is greater than the guaranteed annual amount
+
+        Methods
+        -------
+
+        set_maturity: set the maturity
+        set_fee: set the fee
+        set_spot: set the spot risk free rate
+        set_g_rate: set the guaranteed withdrawal rate
+        set_rollup: set the rollup rate
+        price: calculate the contract  value under the "static", "mixed" and "dynamic" approach.
+        fair_fee: calculate the fair fee under the "static", "mixed" and "dynamic" approach.
+
+        Examples
+        --------
+
+            import numpy as np
+            from processes import CGMYProcess, Gompertz
+            from glwb_dm import GLWB_DM
+
+            cgmy = CGMYProcess(c=0.02, g=5, m=15, y=1.2)
+            gompertz = Gompertz(theta=0.09782020, mu0=0.01076324)  # IPS55M
+            glwb = GLWB_DM(cgmy, cir)
+
+            glwb.set_maturity(53)
+            glwb.set_spot(0.02)
+            glwb.set_rollup(0.08)
+            glwb.set_g_rate(0.03)
+            glwb.penalty = 0.05
+            glwb.set_fee(0.05)
+
+            # Price the contract under "dynamic" policyholder behavior.
+
+            glwb.price("dynamic")
+
+            References
+            ----------
+            [1] Bacinello, Maggistro, Zoccolan "The valuation of GLWB variable annuities with stochastic mortality and
+            dynamic withdrawals", TBD.
+
+        """
 
     def __init__(self, financial_process, mortality_process, **kwargs):
         self.financial_process = financial_process
         self.mortality_process = mortality_process
-        self.maturity = 55
-        self.fee = 0.0
+        self.maturity = 53
+        self.fee = 0.01
         self.spot = 0.02
         self.premium = 100
-        self.rollup = 0.0
-        self.g_rate = 0.0  # Withdrawal rate
+        self.rollup = 0.01
+        self.g_rate = 0.02  # Withdrawal rate
         self.penalty = 0.02
         # Steps to discretize time, withdrawal base account, personal account and intensity of mortality
         self.t_step = 1  # time step
@@ -37,8 +117,6 @@ class GLWB_DM:
         self.k = 10
         self._max_p_account = self.k * self._max_g_account  # max personal account
         self._p_account, self._p_step = np.linspace(0.0, self._max_p_account, self.p_points, retstep=True)
-        # self._p_account = self._map_personal(np.linspace(0, 1, self.p_points))
-        # self._p_account[-1] = self._p_account[-2] * np.exp(self.spot)
         # Constants for the integration
         self._d = np.real(-np.log(self.financial_process.characteristic(-1j)))
         self._beta = np.exp(self.spot + self._d) * (1 - self.fee)
@@ -74,6 +152,11 @@ class GLWB_DM:
             res = a * t / (1 - t) if t != 1 else np.Inf
         return res
 
+    def set_maturity(self, maturity=55):
+        self.maturity = maturity
+        # Number of points to discretize the time
+        self._t_points = int(self.maturity / self.t_step)
+
     def set_fee(self, fee=0.0043):
         assert type(fee) == float
         self.fee = fee
@@ -95,7 +178,7 @@ class GLWB_DM:
 
     def set_rollup(self, rollup=0.01):
         self.rollup = rollup
-        self._max_g_account = self.premium * (1 + self.rollup) ** self.maturity  # max guaranteed account
+        self._max_g_account = self.premium * (1 + self.rollup) ** (self._t_points - 1)   # max guaranteed account
         self._g_account, self._g_step = np.linspace(0, self._max_g_account, self.g_points, retstep=True)
         self._max_p_account = self.k * self._max_g_account  # max personal account
         self._p_account, self._p_step = np.linspace(0, self._max_p_account, self.p_points, retstep=True)
@@ -104,7 +187,6 @@ class GLWB_DM:
             for w in self._p_account:
                 for wd in [0, self.g_rate * a, w]:
                     self._points[(w, a, wd)] = self.calc_points(w, a, wd)
-        self.c_val = np.empty((self.p_points, self.g_points))
 
     def set_g_rate(self, g_rate=0.01):
         self.g_rate = g_rate
@@ -120,12 +202,18 @@ class GLWB_DM:
         # For each (w, a, wd) triple  this function returns _num_inner_pts * _num_outer_pts points
         # which will be needed in the double integral to calculate the new contract values.
         beta = self._beta * max(w - wd, 0)
+        # if wd == 0:
+        #     alpha = a * (1 + self.rollup)
+        # elif 0 < wd <= self.g_rate * a:
+        #     alpha = a
+        # elif self.g_rate * a < wd <= w:
+        #     alpha = a * ((w - wd) / (w - self.g_rate * a))
         if wd == 0:
             alpha = a * (1 + self.rollup)
-        elif 0 < wd <= self.g_rate * a:
+        elif wd == self.g_rate * a:
             alpha = a
-        elif self.g_rate * a < wd <= w:
-            alpha = a * ((w - wd) / (w - self.g_rate * a))
+        elif wd == w and w > self.g_rate * a:
+            alpha = 0
         mbeta = beta * np.exp(self._xx)
         malpha = np.repeat(alpha, self._num_outer_pts)
         points = (mbeta, malpha)
@@ -133,9 +221,16 @@ class GLWB_DM:
 
     def price(self, method="static"):
         """
+        Price the contract under different policyholder behaviors.
 
-        :param method:
-        :return:
+        Parameters:
+        -----------
+        method string:  Approach used in pricing, it can be either "static" (default), "mixed"  or "dynamic".
+
+        Returns:
+        -------
+        float:  value or price of the contract
+
         """
 
         def calc_integral(shift, r, interp_vals, px, fin_density, deltax):
@@ -148,11 +243,11 @@ class GLWB_DM:
             if method == "static":
                 withdrawals = [self.g_rate * a]
             elif method == "dynamic":
-                withdrawals = [0, self.g_rate * a, w]
+                withdrawals = [0, self.g_rate * a, max(w, self.g_rate * a)]
             elif method == "mixed":
-                withdrawals = [self.g_rate * a, w]
+                withdrawals = [self.g_rate * a, max(w, self.g_rate * a)]
             integrals = []
-            px = self.mortality_process.px(t+self.t_step) / self.mortality_process.px(t)
+            px = self.mortality_process.px(t + self.t_step) / self.mortality_process.px(t)
             qx = 1 - px
             for wd in withdrawals:
                 shift = wd - self.penalty * max(wd - self.g_rate * a, 0) + \
@@ -166,6 +261,8 @@ class GLWB_DM:
             return np.max(integrals)
 
         # Step 2. II Compute the contract value at each time step but t=0.
+        self.c_val = np.zeros((self.p_points, self.g_points))
+
         for t in np.arange(self._t_points, 0, -self.t_step):
             t1 = datetime.utcnow()
             print(f'Step {t}\n')
@@ -199,12 +296,20 @@ class GLWB_DM:
 
     def fair_fee(self, a=0, b=1, tol=1e-4, method="static"):
         """
+            Calculate the fair fee.
 
-        :param a:
-        :param b:
-        :param tol:
-        :param method:
-        :return:
+            Params:
+            ------
+            a, b float: with the interval extremes where to search for the fair fee.
+            method string:  Approach used in pricing, it can be either "static" (default), "mixed"  or "dynamic".
+
+            Returns:
+            -------
+            float with the fair fee.
+
+            Notes:
+            -----
+            The fee is searched by the Brent's root finding method.
         """
 
         def fun(x):
