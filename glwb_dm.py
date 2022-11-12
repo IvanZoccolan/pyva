@@ -19,11 +19,6 @@ class GLWB_DM:
         the policyholder can withdraw any amount she wants or surrender.
         The pricing is done by means of  Dynamic Programming (see References) by the "price" method.
 
-        Notes:
-        ------
-        In order to prevent numerical instability a central scenario for the intensity of mortality should be passed to
-        the object via the set_mu_space before calling its price method (see Examples).
-
         Parameters
         ----------
         financial_process : object of class  LevyProcess describing the underlying fund

@@ -1,6 +1,5 @@
 import numpy as np
 from scipy import optimize
-from scipy.integrate import simpson
 from scipy.interpolate import RegularGridInterpolator
 from datetime import datetime
 
@@ -56,7 +55,7 @@ class GLWB:
     set_g_rate: set the guaranteed withdrawal rate
     set_rollup: set the rollup rate
     set_mu_space: set the discretized grid of the intensity of mortality for the Dynamic Programming algorithm.
-        This should be thought as the "central scenario" of the stochastic intensity of mortality (see Exemples)
+        This should be thought as the "central scenario" of the stochastic intensity of mortality (see Examples)
     price: calculate the contract  value under the "static", "mixed" and "dynamic" approach.
     fair_fee: calculate the fair fee under the "static", "mixed" and "dynamic" approach.
 
