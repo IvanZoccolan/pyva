@@ -1,8 +1,6 @@
-import numpy as np
 from scipy import optimize
-from scipy.integrate import simpson
+import numpy as np
 from scipy.interpolate import RegularGridInterpolator
-from datetime import datetime
 
 
 class GLWB_DM:
@@ -98,8 +96,8 @@ class GLWB_DM:
         self.penalty = 0.02
         # Steps to discretize time, withdrawal base account, personal account and intensity of mortality
         self.t_step = 1  # time step
-        self.g_points = 21  # Number of points to discretize the withdrawal base account
-        self.p_points = 21  # Number of points to discretize the personal account
+        self.g_points = 7  # Number of points to discretize the withdrawal base account
+        self.p_points = 81  # Number of points to discretize the personal account
 
         for k, v in kwargs.items():
             if k in self.__dict__:
@@ -111,11 +109,11 @@ class GLWB_DM:
         # Number of points to discretize the time
         self._t_points = int(self.maturity / self.t_step)
         # Withdrawal base
-        self._max_g_account = self.premium * (1 + self.rollup) ** (self._t_points - 1)  # max guaranteed account
-        self._g_account, self._g_step = np.linspace(0.0, self._max_g_account, self.g_points, retstep=True)
+        self._g_account = np.array([self.premium * (1 + self.rollup) ** j for j in range(0, self.g_points - 1)])
+        self._g_account = np.insert(self._g_account, 0, 0)
         # Personal account
-        self.k = 10
-        self._max_p_account = self.k * self._max_g_account  # max personal account
+        self.k = 4
+        self._max_p_account = self.k * self.premium # max personal account
         self._p_account, self._p_step = np.linspace(0.0, self._max_p_account, self.p_points, retstep=True)
         # Constants for the integration
         self._d = np.real(-np.log(self.financial_process.characteristic(-1j)))
@@ -123,34 +121,31 @@ class GLWB_DM:
         # Outer integral
         self.outer_right_limit = 0.5
         self.outer_left_limit = -1.5
-        self._num_outer_pts = 2 ** 5 + 1
+        self._num_outer_pts = 2 ** 6 + 1
         self._xx, self._dx = np.linspace(self.outer_left_limit, self.outer_right_limit,
                                          num=self._num_outer_pts, endpoint=True, retstep=True)
         self._financial_density = np.apply_along_axis(np.vectorize(self.financial_process.density), 0, self._xx)
-        self._points = {}
-        for a in self._g_account:
-            for w in self._p_account:
-                for wd in [0, self.g_rate * a, w]:
-                    self._points[(w, a, wd)] = self.calc_points(w, a, wd)
+        self._set_points()
         self._interp_values = {}
         # Initial contract value
-        self.c_val = np.zeros((self.p_points, self.g_points))
+        self.c_val = [np.zeros((self.p_points, self.g_points))] * (self.maturity+1)
         self._price = 0.0
 
         # Methods
 
-    @staticmethod
-    def _map_personal(t, a=100):
-        # Given the personal account doesn't have an upper bound,
-        # we simulate a "fake" unbounded interval [0, Inf] by mapping  [0, 1] by means of this function
-        try:
-            # This internal function takes either np.arrays or scalar values. In both cases
-            # we check for the value 1 to prevent division by zero warnings.
-            # Duck test. If it's not a np.array it raises TypeError
-            res = np.array([a * x / (1 - x) if x != 1 else np.Inf for x in t])
-        except TypeError:
-            res = a * t / (1 - t) if t != 1 else np.Inf
-        return res
+    def _set_account_grid(self, method="static"):
+        if method == "static" or method == "mixed":
+            self._max_g_account = self.premium
+            self.g_points = 2
+            self._g_account = np.array([0, self.premium])
+        elif method == "dynamic":
+            self.g_points = 7
+            self._g_account = np.array([self.premium * (1 + self.rollup) ** j for j in range(0, self.g_points-1)])
+            self._g_account = np.insert(self._g_account, 0, 0)
+        else:
+            raise ValueError(f'method must be either static, mixed or dynamic')
+        self._set_points()
+        self.c_val = [np.zeros((self.p_points, self.g_points))] * (self.maturity+1)
 
     def set_maturity(self, maturity=55):
         self.maturity = maturity
@@ -161,40 +156,17 @@ class GLWB_DM:
         assert type(fee) == float
         self.fee = fee
         self._beta = np.exp(self.spot + self._d) * (1 - self.fee)
-        self._points = {}
-        for a in self._g_account:
-            for w in self._p_account:
-                for wd in [0, self.g_rate * a, w]:
-                    self._points[(w, a, wd)] = self.calc_points(w, a, wd)
+
 
     def set_spot(self, spot=0.02):
         self.spot = spot
         self._beta = np.exp(self.spot + self._d) * (1 - self.fee)
-        self._points = {}
-        for a in self._g_account:
-            for w in self._p_account:
-                for wd in [0, self.g_rate * a, w]:
-                    self._points[(w, a, wd)] = self.calc_points(w, a, wd)
 
     def set_rollup(self, rollup=0.01):
         self.rollup = rollup
-        self._max_g_account = self.premium * (1 + self.rollup) ** (self._t_points - 1)   # max guaranteed account
-        self._g_account, self._g_step = np.linspace(0, self._max_g_account, self.g_points, retstep=True)
-        self._max_p_account = self.k * self._max_g_account  # max personal account
-        self._p_account, self._p_step = np.linspace(0, self._max_p_account, self.p_points, retstep=True)
-        self._points = {}
-        for a in self._g_account:
-            for w in self._p_account:
-                for wd in [0, self.g_rate * a, w]:
-                    self._points[(w, a, wd)] = self.calc_points(w, a, wd)
 
     def set_g_rate(self, g_rate=0.01):
         self.g_rate = g_rate
-        self._points = {}
-        for a in self._g_account:
-            for w in self._p_account:
-                for wd in [0, self.g_rate * a, w]:
-                    self._points[(w, a, wd)] = self.calc_points(w, a, wd)
 
     def calc_points(self, w, a, wd):
         # Given the personal account value w, guaranteed account value a and withdrawal amount wd
@@ -208,16 +180,25 @@ class GLWB_DM:
         #     alpha = a
         # elif self.g_rate * a < wd <= w:
         #     alpha = a * ((w - wd) / (w - self.g_rate * a))
-        if wd == 0:
+        alpha = 0
+        if abs(wd) <= 1E-10:
             alpha = a * (1 + self.rollup)
-        elif wd == self.g_rate * a:
+        elif abs(wd - self.g_rate * a) <= 1E-10:
             alpha = a
-        elif wd == w and w > self.g_rate * a:
+        elif abs(wd - w) <= 1E-10 and w > self.g_rate * a:
             alpha = 0
         mbeta = beta * np.exp(self._xx)
         malpha = np.repeat(alpha, self._num_outer_pts)
         points = (mbeta, malpha)
         return points
+
+    def _set_points(self):
+        self._points = {}
+        for a in self._g_account:
+            for w in self._p_account:
+                for wd in [0, self.g_rate * a, w]:
+                    # print(f'w: {w}, a: {a}, wd: {wd}\n')
+                    self._points[(w, a, wd)] = self.calc_points(w, a, wd)
 
     def price(self, method="static"):
         """
@@ -233,8 +214,13 @@ class GLWB_DM:
 
         """
 
+        if method not in ["static", "mixed", "dynamic"]:
+            raise ValueError(f'method must be either static, mixed or dynamic')
+
+        self._set_account_grid(method=method)
+
         def calc_integral(shift, r, interp_vals, px, fin_density, deltax):
-            res = shift + np.exp(-r) * px * simpson(interp_vals * fin_density, dx=deltax)
+            res = shift + np.exp(-r) * px * np.trapz(interp_vals * fin_density, dx=deltax)
             return res
 
         def value(w, a, t):
@@ -247,7 +233,8 @@ class GLWB_DM:
             elif method == "mixed":
                 withdrawals = [self.g_rate * a, max(w, self.g_rate * a)]
             integrals = []
-            px = self.mortality_process.px(t + self.t_step) / self.mortality_process.px(t)
+            px = self.mortality_process.px(t + self.t_step) / self.mortality_process.px(t) if t != self.maturity else 0.0
+            # px = self.mortality_process.px(t + self.t_step)
             qx = 1 - px
             for wd in withdrawals:
                 shift = wd - self.penalty * max(wd - self.g_rate * a, 0) + \
@@ -255,32 +242,32 @@ class GLWB_DM:
                 values = self._interp_values[(w, a, wd)]
                 integrals.append(calc_integral(shift=shift, r=self.spot, interp_vals=values,
                                                px=px,
-                                               fin_density=self._financial_density,
-                                               deltax=self._dx)
-                                 )
+                                               fin_density=self._financial_density,deltax=self._dx))
             return np.max(integrals)
 
         # Step 2. II Compute the contract value at each time step but t=0.
-        self.c_val = np.zeros((self.p_points, self.g_points))
+
+        self.c_val = [np.zeros((self.p_points, self.g_points))] * (self.maturity+1)
 
         for t in np.arange(self._t_points, 0, -self.t_step):
-            t1 = datetime.utcnow()
-            print(f'Step {t}\n')
-            interp_func = RegularGridInterpolator((self._p_account, self._g_account), self.c_val, bounds_error=False, fill_value=None)
+            # t1 = datetime.utcnow()
+            # print(f'Step {t}\n')
+            interp_func = RegularGridInterpolator((self._p_account, self._g_account), self.c_val[t], bounds_error=False, fill_value=None)
+            # print(self.c_val[t])
             for key in self._points.keys():
                 self._interp_values[key] = interp_func(self._points[key])
             for k, w in enumerate(self._p_account):
                 for j, a in enumerate(self._g_account):
-                        self.c_val[k, j] = value(w, a, t)
-            t2 = datetime.utcnow()
-            d = t2 - t1
-            print(f'Step  {t} done in {d} secs\n')
+                        self.c_val[t-1][k, j] = value(w, a, t)
+            # t2 = datetime.utcnow()
+            # d = t2 - t1
+            # print(f'Step  {t} done in {d} secs\n')
 
         # Contract value at inception (t=0)
         # Final interpolation
-        t1 = datetime.utcnow()
-        print(f'Step 0\n')
-        interp_func = RegularGridInterpolator((self._p_account, self._g_account), self.c_val, bounds_error=False, fill_value=None)
+        # t1 = datetime.utcnow()
+        # print(f'Step 0\n')
+        interp_func = RegularGridInterpolator((self._p_account, self._g_account), self.c_val[t], bounds_error=False, fill_value=None)
         final_shift = self.mortality_process.qx(1) * self.premium * (1 - self.fee)
         final_beta = self.premium * self._beta
         x = final_beta * np.exp(self._xx)
@@ -288,10 +275,10 @@ class GLWB_DM:
         final_values = interp_func((x, y))
         # Final integration
         self._price = final_shift + np.exp(-self.spot) * self.mortality_process.px(1) * \
-                      simpson(final_values * self._financial_density, dx=self._dx)
-        t2 = datetime.utcnow()
-        d = t2 - t1
-        print(f'Step 0 done in {d} secs\n')
+                       np.trapz(final_values * self._financial_density, dx=self._dx)
+        # t2 = datetime.utcnow()
+        # d = t2 - t1
+        # print(f'Step 0 done in {d} secs\n')
         return self._price
 
     def fair_fee(self, a=0, b=1, tol=1e-4, method="static"):
